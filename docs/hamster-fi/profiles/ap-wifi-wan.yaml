@@ -1,0 +1,29 @@
+name: ap-wifi-wan
+description: Wi-Fi WAN routed to local AP with NAT
+
+wan:
+  interface: wlan0
+  type: wifi
+  addressing: dhcp
+
+lan:
+  interface: ap0
+  type: ap
+  subnet: 192.168.50.0/24
+  gateway: 192.168.50.1
+  dhcp: enabled
+
+wifi_ap:
+  ssid: PiHamsterNet
+  band: 2.4ghz
+  channel: 6
+  security: wpa2
+  passphrase: ********
+
+services:
+  hostapd: true
+  dnsmasq: true
+  nftables: true
+
+nat: enabled
+firewall: enabled

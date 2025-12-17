@@ -1,0 +1,23 @@
+table inet filter {
+	chain input {
+		type filter hook input priority filter; policy drop;
+		iif "lo" accept
+		ct state established,related accept
+		iifname "ap0" udp dport { 53, 67 } accept
+		iifname "ap0" tcp dport 53 accept
+		ip protocol icmp accept
+		iifname "ap0" tcp dport 22 accept
+	}
+
+	chain forward {
+		type filter hook forward priority filter; policy drop;
+		ct state established,related accept
+		iifname "ap0" oifname "wlan0" accept
+	}
+}
+table ip nat {
+	chain postrouting {
+		type nat hook postrouting priority srcnat; policy accept;
+		oifname "wlan0" masquerade
+	}
+}

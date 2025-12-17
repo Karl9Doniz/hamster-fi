@@ -1,0 +1,22 @@
+phy#0
+	Unnamed/non-netdev interface
+		wdev 0x3
+		addr 2e:cf:67:50:a8:82
+		type P2P-device
+		txpower 31.00 dBm
+	Interface ap0
+		ifindex 4
+		wdev 0x2
+		addr 2e:cf:67:f0:a8:82
+		ssid PiHamsterNet
+		type AP
+		channel 149 (5745 MHz), width: 80 MHz, center1: 5775 MHz
+		txpower 31.00 dBm
+	Interface wlan0
+		ifindex 3
+		wdev 0x1
+		addr 2c:cf:67:50:a8:82
+		ssid House_5G
+		type managed
+		channel 149 (5745 MHz), width: 80 MHz, center1: 5775 MHz
+		txpower 31.00 dBm
