@@ -346,8 +346,6 @@ def apply(cfg: AppConfig) -> None:
 
         raise
 
-
-
 def _apply_ap_router(cfg: AppConfig) -> None:
     wan_if = cfg.wan.device
     ap_if = _ensure_ap_iface()
@@ -355,9 +353,9 @@ def _apply_ap_router(cfg: AppConfig) -> None:
     _set_dhcpcd_mode("ap", wan_if)
     _rm_bridge()
 
-    # Avoid route fights: fully release the non-WAN interface
+    # Avoid route fights: release DHCP on the non-WAN interface,
+    # but DO NOT force the link down (it breaks management + surprises the user).
     other = "wlan0" if wan_if == "eth0" else "eth0"
-    # Release DHCP on the non-WAN interface, but DO NOT force the link down.
     _dhcp_release(other)
     subprocess.run(["ip", "addr", "flush", "dev", other], check=False)
     subprocess.run(["ip", "link", "set", other, "up"], check=False)
@@ -379,26 +377,39 @@ def _apply_ap_router(cfg: AppConfig) -> None:
         # Get IP + gateway on wlan0
         _dhcp_or_static("wlan0", cfg)
 
-        # ---- IMPORTANT FIX ----
+        # ---- CRITICAL ROUTING FIX ----
         # Ensure routing matches NAT: prefer wlan0 and remove leftover default routes via eth0.
-        # If default route still points to eth0, traffic goes out eth0 while masquerade is on wlan0 => no internet.
-        has_wlan_default = _out(["ip", "-4", "route", "show", "default", "dev", "wlan0"], check=False).strip()
-        if not has_wlan_default:
-            raise RuntimeError("wlan0 is connected but has no default route (DHCP did not install a gateway).")
+        # Without this, traffic still goes out eth0 while masquerade is on wlan0 => no internet.
 
-        out = _out(["ip", "-4", "route", "show", "default"], check=False)
-        for ln in out.splitlines():
+        # 1) Verify wlan0 actually has a default route (DHCP installed gateway)
+        try:
+            has_wlan_default = (_out(["ip", "-4", "route", "show", "default", "dev", "wlan0"]) or "").strip()
+        except Exception:
+            has_wlan_default = ""
+
+        if not has_wlan_default:
+            raise RuntimeError(
+                "wlan0 is connected but has no default route. "
+                "DHCP did not install a gateway (or was overridden)."
+            )
+
+        # 2) Delete any default routes NOT on wlan0 (typically eth0 leftovers)
+        try:
+            defaults = _out(["ip", "-4", "route", "show", "default"]) or ""
+        except Exception:
+            defaults = ""
+
+        for ln in defaults.splitlines():
             ln = ln.strip()
             if not ln.startswith("default "):
                 continue
-            # keep defaults on wlan0, delete everything else
             if " dev wlan0" in (" " + ln + " "):
                 continue
             subprocess.run(["ip", "route", "del", *ln.split()], check=False)
 
-        # now clean up duplicates if any remained on wlan0
+        # 3) Also remove extra duplicate defaults (keep one on wlan0)
         _cleanup_duplicate_defaults(preferred_if="wlan0")
-        # ---- END FIX ----
+        # ---- END ROUTING FIX ----
 
         # Align AP channel to upstream channel (single-radio requirement)
         link = _read_wlan0_link_freq_channel()
@@ -428,7 +439,6 @@ def _apply_ap_router(cfg: AppConfig) -> None:
 
     _enable_router_sysctls()
 
-    # Use actual default uplink (after we forced routing) or fallback to selected WAN
     effective_wan = _detect_default_uplink() or wan_if
     _persist_nft_rules(cfg, wan_if=effective_wan, lan_if=ap_if)
 
