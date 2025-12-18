@@ -541,7 +541,6 @@ def _apply_station_router(cfg: AppConfig) -> None:
 
 def _apply_bridge_ap(cfg: AppConfig) -> None:
     import time
-
     br = "br0"
     ap_if = _ensure_ap_iface()
 
@@ -566,28 +565,47 @@ def _apply_bridge_ap(cfg: AppConfig) -> None:
     subprocess.run(["ip", "link", "set", "eth0", "master", br], check=False)
     subprocess.run(["ip", "link", "set", ap_if, "master", br], check=False)
 
-    # Start AP; make sure hostapd knows to bridge
+    # Start AP; ensure hostapd bridges via br0
     conf = render_hostapd(cfg, ap_if=ap_if)
     if f"\nbridge={br}\n" not in conf and not conf.rstrip().endswith(f"bridge={br}"):
         conf = conf.rstrip() + f"\nbridge={br}\n"
     _write(HOSTAPD_PATH, conf)
-
     subprocess.run(["systemctl", "enable", "hostapd"], check=False)
     subprocess.run(["systemctl", "restart", "hostapd"], check=False)
 
-    # Now br0 exists, so set dhcpcd mode AFTER creation
-    _set_dhcpcd_mode("bridge", br)
-
-    # Request DHCP on br0 and wait
-    got_ip = False
+    # --- KEY FIX: make dhcpcd manage ONLY br0 in bridge mode ---
+    # Otherwise it will happily DHCP eth0 and install default route with a better metric.
     if _have("dhcpcd"):
+        subprocess.run(["mkdir", "-p", "/etc/dhcpcd.conf.d"], check=False)
+
+        # This drop-in overrides behavior in bridge mode:
+        # - Do NOT manage eth0 or the AP iface
+        # - Manage br0 and let it install the default route
+        bridge_conf = (
+            "# Managed by hamsterfi (bridge mode)\n"
+            "denyinterfaces eth0\n"
+            f"denyinterfaces {ap_if}\n"
+            "\n"
+            f"interface {br}\n"
+            "  ipv4only\n"
+            "  metric 50\n"
+        )
+        _write("/etc/dhcpcd.conf.d/99-hamsterfi-bridge.conf", bridge_conf)
+
+        # Restart dhcpcd so it drops eth0 routing and starts managing br0
         subprocess.run(["systemctl", "restart", "dhcpcd"], check=False)
+
+        # Explicitly release eth0 lease/routes and request on br0
+        subprocess.run(["dhcpcd", "-k", "eth0"], check=False)
         subprocess.run(["dhcpcd", "-4", "-t", "25", "-w", br], check=False)
+
+    # If dhclient is used instead (rare on Pi OS), keep your old behavior
     elif _have("dhclient"):
         subprocess.run(["dhclient", "-v", "-r", br], check=False)
         subprocess.run(["dhclient", "-v", br], check=False)
 
     # Poll for IPv4 on br0
+    got_ip = False
     deadline = time.time() + 25
     while time.time() < deadline:
         out = subprocess.check_output(["ip", "-4", "-br", "addr", "show", br], text=True).strip()
@@ -617,23 +635,20 @@ def _apply_bridge_ap(cfg: AppConfig) -> None:
     subprocess.run(["ip", "addr", "flush", "dev", "eth0"], check=False)
     subprocess.run(["ip", "addr", "flush", "dev", ap_if], check=False)
 
-    # --- CRITICAL: make br0 the Pi's routed interface (eth0 is a bridge port) ---
-    # dhcpcd may leave a default route on eth0 with a slightly better metric.
-    # Remove eth0 default and ensure br0 default wins.
+    # --- Belt + suspenders: ensure eth0 has NO default route, br0 wins ---
     subprocess.run(["ip", "route", "del", "default", "dev", "eth0"], check=False)
 
+    # If br0 has a default route, force it to a low metric
     gw = None
     try:
         d = _out(["ip", "-4", "route", "show", "default", "dev", br]).strip()
     except Exception:
         d = ""
-
     for ln in d.splitlines():
         parts = ln.split()
         if len(parts) >= 3 and parts[0] == "default" and parts[1] == "via":
             gw = parts[2]
             break
-
     if gw:
         subprocess.run(["ip", "route", "replace", "default", "via", gw, "dev", br, "metric", "50"], check=False)
 
