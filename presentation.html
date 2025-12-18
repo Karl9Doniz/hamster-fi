@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+  <meta charset="UTF-8">
+  <title>Hamster-Fi — Wi-Fi роутер для хомʼячків</title>
+  <style>
+    body {
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      margin: 40px;
+      line-height: 1.6;
+      color: #222;
+      max-width: 900px;
+    }
+    h1, h2, h3 {
+      color: #1a4f8b;
+    }
+    h1 {
+      border-bottom: 3px solid #1a4f8b;
+      padding-bottom: 10px;
+    }
+    section {
+      margin-bottom: 60px;
+    }
+    ul {
+      margin-left: 20px;
+    }
+    li {
+      margin-bottom: 8px;
+    }
+    .box {
+      background: #f4f7fb;
+      border-left: 5px solid #1a4f8b;
+      padding: 15px;
+      margin: 20px 0;
+    }
+    .small {
+      color: #555;
+      font-size: 0.9em;
+    }
+    code {
+      background: #eee;
+      padding: 2px 6px;
+      border-radius: 4px;
+    }
+  </style>
+</head>
+<body>
+
+<h1>Hamster-Fi</h1>
+<p><strong>Wi-Fi роутер на Raspberry Pi з режимами AP / Station / Bridge</strong></p>
+
+<section>
+  <h2>1. Ідея проєкту</h2>
+  <p>
+    Hamster-Fi — це навчальний проєкт, який реалізує класичний Wi-Fi роутер
+    на базі <strong>Raspberry Pi</strong> з простим інтерфейсом для користувача.
+  </p>
+  <p>
+    Основна ідея — зробити <strong>«Wi-Fi для хомʼячків»</strong>:
+    користувач може налаштувати мережу без знання Linux, мереж, NAT чи firewall.
+  </p>
+  <div class="box">
+    Фокус: <strong>простота, готові профілі, автоматизація</strong>
+  </div>
+</section>
+
+<section>
+  <h2>2. Підтримуване обладнання</h2>
+  <ul>
+    <li>Raspberry Pi (орієнтовано на Pi 4 / Pi 5)</li>
+    <li>Вбудований Wi-Fi адаптер</li>
+    <li>Ethernet порт</li>
+    <li>Raspberry Pi OS (Debian-based Linux)</li>
+  </ul>
+</section>
+
+<section>
+  <h2>3. Режими роботи</h2>
+
+  <h3>3.1 AP mode (Router)</h3>
+  <ul>
+    <li>Raspberry Pi створює власну Wi-Fi мережу</li>
+    <li>Клієнти отримують IP через DHCP</li>
+    <li>Використовується NAT</li>
+    <li>WAN може бути:
+      <ul>
+        <li>Ethernet (<code>eth0</code>)</li>
+        <li>Wi-Fi (<code>wlan0</code>)</li>
+      </ul>
+    </li>
+  </ul>
+
+  <h3>3.2 Station mode</h3>
+  <ul>
+    <li>Raspberry Pi підключається до існуючої Wi-Fi мережі як клієнт</li>
+    <li>Wi-Fi використовується як WAN</li>
+    <li>Пристрій виступає маршрутизатором для LAN</li>
+  </ul>
+
+  <h3>3.3 Bridge mode</h3>
+  <ul>
+    <li>Wi-Fi і Ethernet обʼєднуються в один L2-міст</li>
+    <li>Без NAT, без маршрутизації</li>
+    <li>Пристрій поводиться як «розумний подовжувач мережі»</li>
+  </ul>
+</section>
+
+<section>
+  <h2>4. WAN конфігурація</h2>
+  <ul>
+    <li>Dynamic IP (DHCP)</li>
+    <li>Static IP:
+      <ul>
+        <li>IP адреса</li>
+        <li>Шлюз</li>
+        <li>DNS</li>
+      </ul>
+    </li>
+  </ul>
+</section>
+
+<section>
+  <h2>5. WLAN конфігурація</h2>
+  <ul>
+    <li>SSID</li>
+    <li>Pre-shared key (WPA2/WPA3)</li>
+    <li>Канал</li>
+    <li>Країна (regulatory domain)</li>
+  </ul>
+</section>
+
+<section>
+  <h2>6. Мережева логіка</h2>
+  <ul>
+    <li>DHCP сервер: <strong>dnsmasq</strong></li>
+    <li>NAT + Firewall: <strong>nftables</strong></li>
+    <li>HostAP: <strong>hostapd</strong></li>
+    <li>IP forwarding через <code>sysctl</code></li>
+  </ul>
+
+  <div class="box">
+    Firewall мінімалістичний:
+    <ul>
+      <li>Drop за замовчуванням</li>
+      <li>Allow established/related</li>
+      <li>Allow LAN → WAN</li>
+      <li>Allow DHCP, DNS</li>
+    </ul>
+  </div>
+</section>
+
+<section>
+  <h2>7. Quick Wizard</h2>
+  <p>
+    Quick Wizard — основний спосіб налаштування.
+    Користувач відповідає лише на базові питання:
+  </p>
+  <ul>
+    <li>Режим роботи</li>
+    <li>Тип WAN</li>
+    <li>DHCP або Static</li>
+    <li>Назва Wi-Fi та пароль</li>
+  </ul>
+</section>
+
+<section>
+  <h2>8. Advanced Mode</h2>
+  <ul>
+    <li>Редагування повного YAML-конфігу</li>
+    <li>Можливість змінити будь-який параметр</li>
+    <li>Валідація конфігурації</li>
+  </ul>
+</section>
+
+<section>
+  <h2>9. Збереження і скидання</h2>
+  <ul>
+    <li>Save config — конфіг зберігається в <code>/etc/hamster-fi/config.yaml</code></li>
+    <li>Reset config — повернення до дефолтних значень</li>
+    <li>Factory defaults — повне скидання</li>
+  </ul>
+</section>
+
+<section>
+  <h2>10. UI</h2>
+  <ul>
+    <li>Web UI (FastAPI)</li>
+    <li>CLI утиліти для діагностики</li>
+    <li>Recovery-скрипт</li>
+  </ul>
+</section>
+
+<section>
+  <h2>11. Тест-план</h2>
+
+  <h3>Use-case 1</h3>
+  <p>Користувач хоче створити власну Wi-Fi мережу з Ethernet інтернетом</p>
+
+  <h3>Use-case 2</h3>
+  <p>Користувач використовує Wi-Fi як WAN</p>
+
+  <h3>Use-case 3</h3>
+  <p>Користувач хоче розширити існуючу мережу через Bridge</p>
+</section>
+
+<section>
+  <h2>12. Структура проєкту</h2>
+  <ul>
+    <li><code>hamsterfi/</code> — основний застосунок</li>
+    <li><code>templates/</code> — UI</li>
+    <li><code>system/</code> — мережеві скрипти</li>
+    <li><code>scripts/</code> — встановлення та recovery</li>
+    <li><code>docs/</code> — документація</li>
+  </ul>
+</section>
+
+<section>
+  <h2>13. Висновки</h2>
+  <ul>
+    <li>Проєкт відповідає вимогам ТЗ</li>
+    <li>Реалізовано всі режими</li>
+    <li>Є простий Wizard і Advanced режим</li>
+    <li>Підходить для навчального Embedded / IoT сценарію</li>
+  </ul>
+</section>
+
+<p class="small">Hamster-Fi — навчальний проєкт. 2025.</p>
+
+</body>
+</html>
