@@ -1,0 +1,184 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# --- defaults (known-good AP router mode) ---
+LAN_IF="ap0"
+LAN_CIDR="192.168.50.1/24"
+LAN_IP="192.168.50.1"
+SSID="HamsterNet"
+PSK="hamster12345"   # >= 8 chars
+WAN_IF="eth0"
+UI_PORT="8080"
+
+STAMP="$(date +%Y%m%d-%H%M%S)"
+BACKUP_DIR="/root/hamsterfi-backups/$STAMP"
+mkdir -p "$BACKUP_DIR"
+
+log() { echo "[hamsterfi-recover] $*"; }
+
+need_root() {
+  if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
+    echo "Run as root: sudo hamsterfi-recover"
+    exit 1
+  fi
+}
+
+backup_file() {
+  local f="$1"
+  if [[ -e "$f" ]]; then
+    mkdir -p "$BACKUP_DIR$(dirname "$f")"
+    cp -a "$f" "$BACKUP_DIR$f"
+  fi
+}
+
+backup_dir_glob() {
+  local pattern="$1"
+  shopt -s nullglob
+  for f in $pattern; do
+    backup_file "$f"
+  done
+  shopt -u nullglob
+}
+
+write_atomic() {
+  local path="$1"
+  local tmp
+  tmp="$(mktemp)"
+  cat >"$tmp"
+  install -m 0644 "$tmp" "$path"
+  rm -f "$tmp"
+}
+
+service_restart() {
+  local svc="$1"
+  systemctl restart "$svc" || {
+    log "ERROR restarting $svc"
+    systemctl status "$svc" --no-pager || true
+    exit 1
+  }
+}
+
+# --- main ---
+need_root
+
+log "Backing up current config to $BACKUP_DIR"
+backup_file /etc/hostapd/hostapd.conf
+backup_dir_glob "/etc/dnsmasq.d/*.conf"
+backup_file /etc/nftables.conf
+backup_file /etc/sysctl.conf
+backup_file /etc/sysctl.d/99-hamsterfi.conf
+backup_file /etc/systemd/system/hamsterfi-web.service
+backup_file /etc/systemd/system/hostapd.service.d/override.conf
+backup_file /etc/systemd/system/dnsmasq.service.d/override.conf
+
+log "Stopping services (best-effort)"
+systemctl stop hamsterfi-web 2>/dev/null || true
+systemctl stop dnsmasq 2>/dev/null || true
+systemctl stop hostapd 2>/dev/null || true
+systemctl stop nftables 2>/dev/null || true
+
+log "Ensuring LAN interface $LAN_IF has $LAN_CIDR"
+ip link set "$LAN_IF" up || true
+ip addr flush dev "$LAN_IF" || true
+ip addr add "$LAN_CIDR" dev "$LAN_IF"
+
+log "Enabling IPv4 forwarding"
+sysctl -w net.ipv4.ip_forward=1 >/dev/null
+mkdir -p /etc/sysctl.d
+printf "net.ipv4.ip_forward=1\n" > /etc/sysctl.d/99-hamsterfi.conf
+log "Writing known-good hostapd config (SSID=$SSID)"
+mkdir -p /etc/hostapd
+cat > /etc/hostapd/hostapd.conf <<EOC
+country_code=UA
+interface=$LAN_IF
+driver=nl80211
+
+ssid=$SSID
+hw_mode=g
+channel=6
+
+wmm_enabled=1
+auth_algs=1
+ignore_broadcast_ssid=0
+
+wpa=2
+wpa_passphrase=$PSK
+wpa_key_mgmt=WPA-PSK
+rsn_pairwise=CCMP
+EOC
+
+log "Cleaning dnsmasq snippets that often conflict"
+rm -f /etc/dnsmasq.d/ap0-lan.conf /etc/dnsmasq.d/hamster-fi.conf || true
+
+sed -i '/^\s*bind-interfaces\s*$/d' /etc/dnsmasq.d/*.conf 2>/dev/null || true
+
+log "Writing known-good dnsmasq config for $LAN_IF"
+write_atomic /etc/dnsmasq.d/hamster-fi.conf <<EOC
+interface=$LAN_IF
+bind-dynamic
+listen-address=$LAN_IP
+
+dhcp-range=192.168.50.50,192.168.50.200,12h
+dhcp-option=option:router,$LAN_IP
+dhcp-option=option:dns-server,$LAN_IP
+
+domain-needed
+bogus-priv
+EOC
+
+log "Applying minimal firewall + NAT (nftables)"
+nft flush ruleset
+
+nft add table inet filter
+nft 'add chain inet filter input { type filter hook input priority 0; policy drop; }'
+nft 'add chain inet filter forward { type filter hook forward priority 0; policy drop; }'
+
+nft add rule inet filter input iif lo accept
+nft add rule inet filter input ct state established,related accept
+
+# DHCP/DNS from LAN clients
+nft add rule inet filter input iifname "$LAN_IF" udp dport 67 accept
+nft add rule inet filter input iifname "$LAN_IF" udp dport 68 accept
+nft add rule inet filter input iifname "$LAN_IF" udp dport 53 accept
+nft add rule inet filter input iifname "$LAN_IF" tcp dport 53 accept
+
+nft add rule inet filter input iifname "$LAN_IF" tcp dport "$UI_PORT" accept
+# ping for sanity
+nft add rule inet filter input ip protocol icmp accept
+
+# Forward LAN -> WAN
+nft add rule inet filter forward ct state established,related accept
+nft add rule inet filter forward iifname "$LAN_IF" oifname "$WAN_IF" accept
+
+# NAT
+nft add table ip nat
+nft 'add chain ip nat postrouting { type nat hook postrouting priority 100; policy accept; }'
+nft add rule ip nat postrouting oifname "$WAN_IF" masquerade
+
+# SSH
+nft add rule inet filter input iifname "wlan0" tcp dport 22 ct state new accept
+
+log "Starting services"
+service_restart hostapd
+service_restart dnsmasq
+
+# Always start the web UI if the unit file exists
+if [[ -f /etc/systemd/system/hamsterfi-web.service || -f /lib/systemd/system/hamsterfi-web.service ]]; then
+  log "Starting hamsterfi-web.service"
+  systemctl daemon-reload || true
+  systemctl restart hamsterfi-web || systemctl start hamsterfi-web || true
+else
+  log "hamsterfi-web.service missing, starting transient unit hamsterfi-web-transient"
+  APPDIR="/opt/hamster-fi"
+  [[ -d "$APPDIR" ]] || APPDIR="$HOME/Documents/hamster-fi"
+  systemd-run --unit=hamsterfi-web-transient --working-directory="$APPDIR" \
+    "$APPDIR/.venv/bin/uvicorn" hamsterfi.main:app --host 0.0.0.0 --port 8080
+fi
+
+log "Quick checks:"
+iw dev | sed -n '1,120p' || true
+ss -lunp | egrep ':(53|67)\b' || true
+ss -ltnp | grep ":$UI_PORT" || true
+
+log "DONE. Connect to Wi-Fi '$SSID' (password: $PSK), open http://$LAN_IP:$UI_PORT"
+log "Backup of previous state: $BACKUP_DIR"

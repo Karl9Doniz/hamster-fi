@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+echo "=== ip addr ==="; ip -br addr
+echo "=== routes ==="; ip route | sed -n "1,15p"
+
+echo "=== hostapd ==="
+systemctl is-active hostapd >/dev/null && echo "OK" || systemctl status hostapd --no-pager
+
+echo "=== dnsmasq ==="
+systemctl is-active dnsmasq >/dev/null && echo "OK" || systemctl status dnsmasq --no-pager
+
+echo "=== nft ==="; nft list ruleset | sed -n "1,180p"
+
+echo "=== ports (53/67/8080) ==="
+ss -lunp | egrep ':(53|67)\b' || true
+ss -ltnp | grep ':8080' || echo "no 8080 listener"
+
+echo "=== hamsterfi service ==="
+systemctl status hamsterfi-web --no-pager 2>/dev/null || true
+
+echo "=== recent logs (dnsmasq/hostapd/web) ==="
+journalctl -u dnsmasq -n 30 --no-pager 2>/dev/null || true
+journalctl -u hostapd -n 30 --no-pager 2>/dev/null || true
+journalctl -u hamsterfi-web -n 30 --no-pager 2>/dev/null || true
