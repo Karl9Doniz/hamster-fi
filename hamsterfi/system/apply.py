@@ -143,17 +143,60 @@ def _detect_default_uplink() -> Optional[str]:
 
 def _persist_nft_rules(cfg: AppConfig, wan_if: str, lan_if: str) -> None:
     rules = render_nft(cfg, wan_if=wan_if, lan_if=lan_if, ui_port=UI_PORT)
+
+    # --- Keep hamsterfi.local working in AP mode ---
+    # mDNS = UDP/5353 (224.0.0.251). Your default policy is drop, so we must allow it on LAN/AP iface.
+    mdns_rule = f'iifname "{lan_if}" udp dport 5353 accept'
+
+    # If render_nft doesn't already allow 5353 on LAN, inject it near other LAN accepts.
+    if mdns_rule not in rules:
+        lines = rules.splitlines()
+        out = []
+        injected = False
+
+        for ln in lines:
+            out.append(ln)
+
+            # After we allow UI port on LAN, inject mDNS (nice and local).
+            # This matches your typical structure: ... tcp dport 8080 accept
+            if (not injected) and (f'iifname "{lan_if}"' in ln) and ("tcp dport" in ln) and ("accept" in ln):
+                # Insert right after the first LAN accept rule we see
+                out.append(f"\t\t{mdns_rule}")
+                injected = True
+
+        # If we didn't find a good spot, inject before the end of input chain as fallback.
+        if not injected:
+            out2 = []
+            for ln in out:
+                if (not injected) and ln.strip() == "}":
+                    # crude but works: add before first closing brace after input chain content
+                    out2.append(f"\t\t{mdns_rule}")
+                    injected = True
+                out2.append(ln)
+            out = out2
+
+        rules = "\n".join(out) + "\n"
+
+    # Write the rules file
     _write(NFT_PATH, rules)
 
+    # Ensure main nftables.conf includes /etc/nftables.d/*.nft
     _write(
         "/etc/nftables.conf",
         "flush ruleset\n"
         "include \"/etc/nftables.d/*.nft\"\n",
     )
 
+    # Load rules immediately
     _run(["nft", "-f", "/etc/nftables.conf"], check=True)
+
+    # Enable + restart services
     subprocess.run(["systemctl", "enable", "nftables"], check=False)
     subprocess.run(["systemctl", "restart", "nftables"], check=False)
+
+    # Restart Avahi so hostname advertisement follows interface changes reliably
+    subprocess.run(["systemctl", "enable", "avahi-daemon"], check=False)
+    subprocess.run(["systemctl", "restart", "avahi-daemon"], check=False)
 
 
 def _cleanup_duplicate_defaults(preferred_if: str) -> None:
