@@ -70,8 +70,9 @@ def wizard_wan(request: Request):
     return templates.TemplateResponse("wizard_wan.html", {"request": request, "cfg": cfg})
 
 
-@app.post("/wizard/wan")
+@app.post("/wizard/wan", response_class=HTMLResponse)
 def wizard_wan_post(
+    request: Request,
     wan_device: str = Form(...),
     wan_ipv4: str = Form(...),
     static_address: str = Form(""),
@@ -81,6 +82,12 @@ def wizard_wan_post(
     upstream_psk: str = Form(""),
 ):
     cfg = load_config()
+
+    # Enforce mode constraints (so UI can't accidentally save nonsense)
+    if cfg.mode == "bridge":
+        wan_device = "eth0"
+    if cfg.mode == "station":
+        wan_device = "wlan0"
 
     cfg.wan.device = wan_device
     cfg.wan.ipv4 = wan_ipv4
@@ -92,16 +99,26 @@ def wizard_wan_post(
         if dns_list:
             cfg.wan.static.dns = dns_list
 
-    if cfg.wan.device == "wlan0":
+    # Require upstream credentials when WAN is Wi‑Fi (station OR AP+WAN=wlan0)
+    need_upstream = (cfg.mode == "station") or (cfg.mode == "ap" and cfg.wan.device == "wlan0")
+
+    if need_upstream:
         cfg.wan.upstream_ssid = upstream_ssid.strip() or None
         cfg.wan.upstream_psk = upstream_psk.strip() or None
+
+        if not cfg.wan.upstream_ssid or not cfg.wan.upstream_psk:
+            # Don't save a half-configured state
+            return templates.TemplateResponse(
+                "wizard_wan.html",
+                {
+                    "request": request,
+                    "cfg": cfg,
+                    "error": "Upstream Wi‑Fi SSID and password are required when WAN is Wi‑Fi (wlan0).",
+                },
+            )
     else:
         cfg.wan.upstream_ssid = None
         cfg.wan.upstream_psk = None
-
-    # Bridge: Ethernet uplink only (practical limitation)
-    if cfg.mode == "bridge" and cfg.wan.device != "eth0":
-        cfg.wan.device = "eth0"
 
     save_config(cfg)
     return RedirectResponse("/wizard/wlan", status_code=303)

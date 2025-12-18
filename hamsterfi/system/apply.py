@@ -266,11 +266,51 @@ def _wait_wlan0_connected(timeout_s: int = 15) -> bool:
 
 
 def apply(cfg: AppConfig) -> None:
-    # stop LAN services first (but NEVER leave the box broken if apply fails)
+    # Crash-safe-ish apply:
+    # 1) snapshot current on-disk config files we touch
+    # 2) attempt to apply requested mode
+    # 3) on any failure, restore files + restart services so the box stays reachable
+
+    files_to_backup = [
+        HOSTAPD_PATH,
+        DNSMASQ_PATH,
+        NFT_PATH,
+        WPA_SUPPLICANT_WLAN0,
+        "/etc/dhcpcd.conf",
+    ]
+
+    backups = {}
+    for p in files_to_backup:
+        try:
+            with open(p, "r", encoding="utf-8") as f:
+                backups[p] = f.read()
+        except FileNotFoundError:
+            backups[p] = None
+        except Exception:
+            # don't fail apply because a backup read failed
+            backups[p] = None
+
+    def _restore_files() -> None:
+        for p, content in backups.items():
+            try:
+                if content is None:
+                    # remove file if we created it
+                    if os.path.exists(p):
+                        os.remove(p)
+                else:
+                    os.makedirs(os.path.dirname(p), exist_ok=True)
+                    with open(p, "w", encoding="utf-8") as f:
+                        f.write(content)
+            except Exception:
+                pass
+
     try:
+        # Stop LAN services before changing interfaces/config.
+        # (We restart them later in the mode-specific routines.)
         subprocess.run(["systemctl", "stop", "hostapd"], check=False)
         subprocess.run(["systemctl", "stop", "dnsmasq"], check=False)
 
+        # Never leave physical links down.
         subprocess.run(["ip", "link", "set", "eth0", "up"], check=False)
         subprocess.run(["ip", "link", "set", "wlan0", "up"], check=False)
 
@@ -283,13 +323,29 @@ def apply(cfg: AppConfig) -> None:
         else:
             raise RuntimeError(f"Unknown mode: {cfg.mode}")
 
-    except Exception as e:
-        # best-effort rollback: bring AP back so user can recover via UI
-        ap_if = _ensure_ap_iface()
-        subprocess.run(["ip", "link", "set", ap_if, "up"], check=False)
-        subprocess.run(["systemctl", "restart", "hostapd"], check=False)
-        subprocess.run(["systemctl", "restart", "dnsmasq"], check=False)
+    except Exception:
+        # Restore on-disk configs and try to put services back.
+        _restore_files()
+
+        # Remove any unexpected bridge that could have been created.
+        try:
+            _rm_bridge()
+        except Exception:
+            pass
+
+        # Best-effort: bring AP iface back so user can recover via UI
+        try:
+            ap_if = _ensure_ap_iface()
+            subprocess.run(["ip", "link", "set", ap_if, "up"], check=False)
+        except Exception:
+            pass
+
+        # Restart core services (best-effort)
+        for svc in ["dhcpcd", "nftables", "hostapd", "dnsmasq", "wpa_supplicant@wlan0"]:
+            subprocess.run(["systemctl", "restart", svc], check=False)
+
         raise
+
 
 
 def _apply_ap_router(cfg: AppConfig) -> None:
@@ -301,8 +357,10 @@ def _apply_ap_router(cfg: AppConfig) -> None:
 
     # Avoid route fights: fully release the non-WAN interface
     other = "wlan0" if wan_if == "eth0" else "eth0"
+    # Avoid route fights: release DHCP on the non-WAN interface,
+    # but DO NOT force the link down (it breaks management + surprises the user).
     _dhcp_release(other)
-    subprocess.run(["ip", "link", "set", other, "down"], check=False)
+    subprocess.run(["ip", "link", "set", other, "up"], check=False)
 
     # If WAN is wlan0: connect upstream FIRST and obtain DHCP FIRST.
     if wan_if == "wlan0":

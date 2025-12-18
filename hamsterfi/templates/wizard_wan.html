@@ -4,44 +4,144 @@
   <div class="text-xl font-semibold mb-2">Step 2 — WAN (Internet source)</div>
 
   <div class="text-slate-400 mb-4">
-    Pick where the Pi gets internet from. In <span class="text-slate-200">AP</span> mode you can use either <b>Ethernet WAN</b> or <b>Wi-Fi WAN</b> (wlan0 joins an upstream network while ap0 stays as the hotspot).
+    Choose where the Raspberry Pi gets internet from.
+    <span class="text-slate-200">AP</span> means Pi is a hotspot (LAN = ap0).
+    <span class="text-slate-200">Station</span> means Pi joins an upstream Wi‑Fi (WAN = wlan0).
+    <span class="text-slate-200">Bridge</span> is Ethernet‑uplink only.
   </div>
+
+  {% if error %}
+    <div class="mb-4 p-3 rounded-xl bg-red-900/40 border border-red-700 text-red-200">
+      {{ error }}
+    </div>
+  {% endif %}
 
   <form method="post" action="/wizard/wan" class="space-y-4">
     <div>
       <div class="font-semibold mb-2">WAN device</div>
-      <select name="wan_device" class="w-full p-3 rounded-xl bg-slate-800">
-        <option value="eth0" {% if cfg.wan.device=='eth0' %}selected{% endif %}>Ethernet (eth0)</option>
-        <option value="wlan0" {% if cfg.wan.device=='wlan0' %}selected{% endif %}>Wi-Fi (wlan0)</option>
-      </select>
+
+      {% if cfg.mode == "bridge" %}
+        <select name="wan_device" class="w-full p-3 rounded-xl bg-slate-800 opacity-70" disabled>
+          <option value="eth0" selected>Ethernet (eth0)</option>
+        </select>
+        <input type="hidden" name="wan_device" value="eth0">
+        <div class="text-slate-400 text-sm mt-2">Bridge mode currently supports Ethernet uplink only.</div>
+
+      {% elif cfg.mode == "station" %}
+        <select name="wan_device" class="w-full p-3 rounded-xl bg-slate-800 opacity-70" disabled>
+          <option value="wlan0" selected>Wi‑Fi (wlan0)</option>
+        </select>
+        <input type="hidden" name="wan_device" value="wlan0">
+        <div class="text-slate-400 text-sm mt-2">Station mode always uses Wi‑Fi as WAN.</div>
+
+      {% else %}
+        <select id="wan_device" name="wan_device" class="w-full p-3 rounded-xl bg-slate-800">
+          <option value="eth0" {% if cfg.wan.device=='eth0' %}selected{% endif %}>Ethernet (eth0)</option>
+          <option value="wlan0" {% if cfg.wan.device=='wlan0' %}selected{% endif %}>Wi‑Fi (wlan0)</option>
+        </select>
+      {% endif %}
     </div>
 
-    <div>
-      <div class="font-semibold mb-2">WAN IPv4</div>
-      <select name="wan_ipv4" class="w-full p-3 rounded-xl bg-slate-800">
-        <option value="dhcp" {% if cfg.wan.ipv4=='dhcp' %}selected{% endif %}>Dynamic (DHCP)</option>
-        <option value="static" {% if cfg.wan.ipv4=='static' %}selected{% endif %}>Static</option>
-      </select>
+    <div class="p-4 rounded-xl bg-slate-800 space-y-3">
+      <div class="font-semibold">WAN IPv4 config</div>
+
+      <div class="grid grid-cols-2 gap-3">
+        <label class="flex items-center gap-2">
+          <input type="radio" name="wan_ipv4" value="dhcp" {% if cfg.wan.ipv4=='dhcp' %}checked{% endif %}>
+          <span>DHCP (recommended)</span>
+        </label>
+
+        <label class="flex items-center gap-2">
+          <input type="radio" name="wan_ipv4" value="static" {% if cfg.wan.ipv4=='static' %}checked{% endif %}>
+          <span>Static</span>
+        </label>
+      </div>
+
+      <div id="wan_static_box" class="space-y-2">
+        <input name="static_address" class="w-full p-2 rounded bg-slate-900"
+               placeholder="Address (e.g. 192.168.1.200/24)" value="{{cfg.wan.static.address}}">
+        <input name="static_gateway" class="w-full p-2 rounded bg-slate-900"
+               placeholder="Gateway (e.g. 192.168.1.1)" value="{{cfg.wan.static.gateway}}">
+        <input name="static_dns" class="w-full p-2 rounded bg-slate-900"
+               placeholder="DNS (comma-separated, e.g. 1.1.1.1,8.8.8.8)" value="{{cfg.wan.static.dns|join(',')}}">
+        <div class="text-slate-400 text-sm">
+          Static is rarely needed. Use DHCP unless you have a good reason.
+        </div>
+      </div>
     </div>
 
-    <div class="p-4 rounded-xl bg-slate-800">
-      <div class="font-semibold mb-2">Static (only if selected)</div>
-      <input name="static_address" class="w-full p-2 rounded bg-slate-900 mb-2" placeholder="192.168.1.200/24" value="{{cfg.wan.static.address}}">
-      <input name="static_gateway" class="w-full p-2 rounded bg-slate-900 mb-2" placeholder="192.168.1.1" value="{{cfg.wan.static.gateway}}">
-      <input name="static_dns" class="w-full p-2 rounded bg-slate-900" placeholder="1.1.1.1,8.8.8.8" value="{{cfg.wan.static.dns | join(',')}}">
-    </div>
+    <!-- Upstream credentials: REQUIRED when WAN is wlan0 for Station, or for AP+WAN=wlan0 -->
+    <div id="upstream_box" class="p-4 rounded-xl bg-slate-800 space-y-2">
+      <div class="font-semibold">Upstream Wi‑Fi credentials (required)</div>
 
-    {% if (cfg.mode == "station") or (cfg.mode == "ap" and cfg.wan.device == "wlan0") %}
-    <div class="p-4 rounded-xl bg-slate-800">
-      <div class="font-semibold mb-2">Upstream Wi-Fi credentials</div>
-      <input name="upstream_ssid" class="w-full p-2 rounded bg-slate-900 mb-2" placeholder="Upstream SSID" value="{{cfg.wan.upstream_ssid or ''}}">
-      <input name="upstream_psk" class="w-full p-2 rounded bg-slate-900" placeholder="Upstream password" type="password" value="{{cfg.wan.upstream_psk or ''}}">
+      <input id="upstream_ssid" name="upstream_ssid" class="w-full p-2 rounded bg-slate-900"
+             placeholder="Upstream SSID" value="{{cfg.wan.upstream_ssid or ''}}">
+
+      <input id="upstream_psk" name="upstream_psk" class="w-full p-2 rounded bg-slate-900"
+             placeholder="Upstream Wi‑Fi password" type="password" value="{{cfg.wan.upstream_psk or ''}}">
+
+      <label class="flex items-center gap-2 text-slate-300 text-sm">
+        <input id="show_psk" type="checkbox">
+        <span>Show password</span>
+      </label>
+
+      <div class="text-slate-400 text-sm">
+        Note: Raspberry Pi has a single Wi‑Fi radio. In AP+WAN=wlan0 mode, the hotspot and the upstream
+        network must share the same channel; Hamster‑Fi will try to align the AP channel automatically.
+      </div>
     </div>
-    {% endif %}
 
     <button class="w-full py-3 rounded-xl bg-emerald-600 hover:bg-emerald-500 font-semibold">
       Continue
     </button>
   </form>
 </div>
+
+<script>
+(function () {
+  const mode = "{{ cfg.mode }}";
+  const devSel = document.getElementById("wan_device"); // may be null if disabled due to mode
+  const upstreamBox = document.getElementById("upstream_box");
+  const ssid = document.getElementById("upstream_ssid");
+  const psk = document.getElementById("upstream_psk");
+
+  const showPsk = document.getElementById("show_psk");
+  if (showPsk && psk) {
+    showPsk.addEventListener("change", () => {
+      psk.type = showPsk.checked ? "text" : "password";
+    });
+  }
+
+  function currentWanDevice() {
+    if (devSel) return devSel.value;
+    // in bridge/station we used hidden input; infer from mode
+    if (mode === "station") return "wlan0";
+    return "eth0";
+  }
+
+  function sync() {
+    // static box toggle
+    const ipv4 = document.querySelector('input[name="wan_ipv4"]:checked')?.value || "dhcp";
+    const staticBox = document.getElementById("wan_static_box");
+    if (staticBox) staticBox.style.display = (ipv4 === "static") ? "block" : "none";
+
+    // upstream creds toggle
+    const wanDev = currentWanDevice();
+    const needUpstream = (mode === "station") || (mode === "ap" && wanDev === "wlan0");
+
+    upstreamBox.style.display = needUpstream ? "block" : "none";
+    ssid.required = needUpstream;
+    psk.required = needUpstream;
+
+    if (!needUpstream) {
+      ssid.value = "";
+      psk.value = "";
+    }
+  }
+
+  document.querySelectorAll('input[name="wan_ipv4"]').forEach(r => r.addEventListener("change", sync));
+  if (devSel) devSel.addEventListener("change", sync);
+  sync();
+})();
+</script>
 {% endblock %}
