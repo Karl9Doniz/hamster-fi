@@ -360,52 +360,100 @@ def _apply_ap_router(cfg: AppConfig) -> None:
     subprocess.run(["ip", "addr", "flush", "dev", other], check=False)
     subprocess.run(["ip", "link", "set", other, "up"], check=False)
 
-    def _get_gw_for_dev(dev: str) -> str | None:
-        """
-        Return gateway IP from: ip -4 route show default dev <dev>
-        Expected format: 'default via <GW> dev <dev> ...'
-        """
+    def _safe_out(cmd: list[str]) -> str:
         try:
-            out = (_out(["ip", "-4", "route", "show", "default", "dev", dev]) or "").strip()
+            return _out(cmd) or ""
         except Exception:
-            return None
+            return ""
 
-        for ln in out.splitlines():
+    def _default_gw_any() -> str | None:
+        """
+        Return gateway from any existing default route:
+        'default via <GW> dev <IF> ...'
+        """
+        txt = _safe_out(["ip", "-4", "route", "show", "default"]).strip()
+        for ln in txt.splitlines():
             parts = ln.split()
-            if not parts:
-                continue
-            if parts[0] != "default":
-                continue
-            if "via" in parts:
-                i = parts.index("via")
-                if i + 1 < len(parts):
-                    return parts[i + 1]
+            if len(parts) >= 3 and parts[0] == "default" and parts[1] == "via":
+                return parts[2]
         return None
 
-    def _prefer_wan_default(preferred_dev: str, backup_dev: str) -> None:
+    def _default_gw_for_dev(dev: str) -> str | None:
         """
-        Make preferred_dev the kernel's chosen uplink by metrics.
-        Keep backup_dev as fallback with a very high metric.
+        Return gateway from default route bound to a specific dev (if present).
         """
-        gw_pref = _get_gw_for_dev(preferred_dev)
-        if not gw_pref:
-            raise RuntimeError(f"{preferred_dev} has no default route (no gateway).")
+        txt = _safe_out(["ip", "-4", "route", "show", "default", "dev", dev]).strip()
+        for ln in txt.splitlines():
+            parts = ln.split()
+            if len(parts) >= 3 and parts[0] == "default" and parts[1] == "via":
+                return parts[2]
+        return None
 
-        # Preferred route: low metric
+    def _dhcpcd_lease_router(dev: str) -> str | None:
+        """
+        Try to parse dhcpcd lease file for router(s).
+        Common locations on Raspberry Pi OS:
+          /var/lib/dhcpcd5/dhcpcd-<dev>.lease
+          /var/lib/dhcpcd/dhcpcd-<dev>.lease
+        Lease format is usually text with a line like: routers=192.168.110.1
+        """
+        candidates = [
+            f"/var/lib/dhcpcd5/dhcpcd-{dev}.lease",
+            f"/var/lib/dhcpcd/dhcpcd-{dev}.lease",
+        ]
+        for path in candidates:
+            try:
+                with open(path, "r", encoding="utf-8", errors="ignore") as f:
+                    for ln in f:
+                        ln = ln.strip()
+                        if ln.startswith("routers=") or ln.startswith("router="):
+                            v = ln.split("=", 1)[1].strip()
+                            if v:
+                                # sometimes multiple routers separated by space
+                                return v.split()[0]
+            except FileNotFoundError:
+                continue
+            except Exception:
+                continue
+        return None
+
+    def _prefer_default(preferred_dev: str, backup_dev: str) -> None:
+        """
+        Force kernel routing preference by metrics:
+        - preferred_dev metric 50
+        - backup_dev metric 5000 (or delete if no gw)
+        Works even if preferred_dev did NOT receive a default route from DHCP.
+        """
+        # Prefered GW: try dev-specific default, otherwise infer from any default, otherwise from lease.
+        gw_pref = _default_gw_for_dev(preferred_dev)
+        if not gw_pref:
+            gw_pref = _default_gw_any()
+        if not gw_pref:
+            gw_pref = _dhcpcd_lease_router(preferred_dev)
+
+        if not gw_pref:
+            raise RuntimeError(
+                f"{preferred_dev} is up but no gateway could be inferred. "
+                f"Check: ip -4 route show default ; iw dev {preferred_dev} link"
+            )
+
+        # Force preferred default
         subprocess.run(
             ["ip", "route", "replace", "default", "via", gw_pref, "dev", preferred_dev, "metric", "50"],
             check=False,
         )
 
-        # Backup route: if it exists, push it far away via a high metric (or delete if you prefer)
-        gw_bak = _get_gw_for_dev(backup_dev)
+        # Keep backup as fallback with high metric (or delete)
+        gw_bak = _default_gw_for_dev(backup_dev)
+        if not gw_bak:
+            gw_bak = _dhcpcd_lease_router(backup_dev)
+
         if gw_bak:
             subprocess.run(
                 ["ip", "route", "replace", "default", "via", gw_bak, "dev", backup_dev, "metric", "5000"],
                 check=False,
             )
         else:
-            # If no gateway on backup dev, at least remove any stray default bound to that dev
             subprocess.run(["ip", "route", "del", "default", "dev", backup_dev], check=False)
 
     # If WAN is wlan0: connect upstream FIRST and obtain DHCP FIRST.
@@ -424,8 +472,8 @@ def _apply_ap_router(cfg: AppConfig) -> None:
 
         _dhcp_or_static("wlan0", cfg)
 
-        # THE FIX: prefer wlan0 by metric, keep eth0 as backup
-        _prefer_wan_default(preferred_dev="wlan0", backup_dev="eth0")
+        # THE REAL FIX: force routing preference (metrics), even if DHCP didn't add default on wlan0
+        _prefer_default(preferred_dev="wlan0", backup_dev="eth0")
 
         # Align AP channel to upstream channel (single-radio requirement)
         link = _read_wlan0_link_freq_channel()
@@ -446,8 +494,7 @@ def _apply_ap_router(cfg: AppConfig) -> None:
     # Configure WAN if eth0
     if wan_if == "eth0":
         _dhcp_or_static("eth0", cfg)
-        # Prefer eth0; keep wlan0 as backup (same logic)
-        _prefer_wan_default(preferred_dev="eth0", backup_dev="wlan0")
+        _prefer_default(preferred_dev="eth0", backup_dev="wlan0")
 
     # DHCP/DNS on LAN
     _write(DNSMASQ_PATH, render_dnsmasq(cfg, lan_if=ap_if))
