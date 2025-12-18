@@ -347,6 +347,8 @@ def apply(cfg: AppConfig) -> None:
         raise
 
 def _apply_ap_router(cfg: AppConfig) -> None:
+    import time
+
     wan_if = cfg.wan.device
     ap_if = _ensure_ap_iface()
 
@@ -366,22 +368,7 @@ def _apply_ap_router(cfg: AppConfig) -> None:
         except Exception:
             return ""
 
-    def _default_gw_any() -> str | None:
-        """
-        Return gateway from any existing default route:
-        'default via <GW> dev <IF> ...'
-        """
-        txt = _safe_out(["ip", "-4", "route", "show", "default"]).strip()
-        for ln in txt.splitlines():
-            parts = ln.split()
-            if len(parts) >= 3 and parts[0] == "default" and parts[1] == "via":
-                return parts[2]
-        return None
-
     def _default_gw_for_dev(dev: str) -> str | None:
-        """
-        Return gateway from default route bound to a specific dev (if present).
-        """
         txt = _safe_out(["ip", "-4", "route", "show", "default", "dev", dev]).strip()
         for ln in txt.splitlines():
             parts = ln.split()
@@ -389,14 +376,15 @@ def _apply_ap_router(cfg: AppConfig) -> None:
                 return parts[2]
         return None
 
+    def _default_gw_any() -> str | None:
+        txt = _safe_out(["ip", "-4", "route", "show", "default"]).strip()
+        for ln in txt.splitlines():
+            parts = ln.split()
+            if len(parts) >= 3 and parts[0] == "default" and parts[1] == "via":
+                return parts[2]
+        return None
+
     def _dhcpcd_lease_router(dev: str) -> str | None:
-        """
-        Try to parse dhcpcd lease file for router(s).
-        Common locations on Raspberry Pi OS:
-          /var/lib/dhcpcd5/dhcpcd-<dev>.lease
-          /var/lib/dhcpcd/dhcpcd-<dev>.lease
-        Lease format is usually text with a line like: routers=192.168.110.1
-        """
         candidates = [
             f"/var/lib/dhcpcd5/dhcpcd-{dev}.lease",
             f"/var/lib/dhcpcd/dhcpcd-{dev}.lease",
@@ -409,7 +397,6 @@ def _apply_ap_router(cfg: AppConfig) -> None:
                         if ln.startswith("routers=") or ln.startswith("router="):
                             v = ln.split("=", 1)[1].strip()
                             if v:
-                                # sometimes multiple routers separated by space
                                 return v.split()[0]
             except FileNotFoundError:
                 continue
@@ -417,44 +404,51 @@ def _apply_ap_router(cfg: AppConfig) -> None:
                 continue
         return None
 
+    def _wait_for_gw(preferred_dev: str, timeout_s: int = 15) -> str | None:
+        """
+        dhcpcd is async; sometimes it adds the default route a bit later.
+        Poll until we can infer a gateway.
+        """
+        deadline = time.time() + timeout_s
+        while time.time() < deadline:
+            gw = _default_gw_for_dev(preferred_dev)
+            if not gw:
+                gw = _default_gw_any()
+            if not gw:
+                gw = _dhcpcd_lease_router(preferred_dev)
+            if gw:
+                return gw
+            time.sleep(0.5)
+        return None
+
     def _prefer_default(preferred_dev: str, backup_dev: str) -> None:
         """
-        Force kernel routing preference by metrics:
-        - preferred_dev metric 50
-        - backup_dev metric 5000 (or delete if no gw)
-        Works even if preferred_dev did NOT receive a default route from DHCP.
+        Force preferred default route by metric.
+        This is required in your situation because both interfaces receive defaults,
+        and eth0 has a lower metric so it wins (exactly what you’re seeing).  [oai_citation:2‡log.txt](sediment://file_000000005cac7243aa3d6d90c7eb260c)
         """
-        # Prefered GW: try dev-specific default, otherwise infer from any default, otherwise from lease.
-        gw_pref = _default_gw_for_dev(preferred_dev)
-        if not gw_pref:
-            gw_pref = _default_gw_any()
-        if not gw_pref:
-            gw_pref = _dhcpcd_lease_router(preferred_dev)
-
+        gw_pref = _wait_for_gw(preferred_dev, timeout_s=15)
         if not gw_pref:
             raise RuntimeError(
-                f"{preferred_dev} is up but no gateway could be inferred. "
+                f"{preferred_dev} is up but no gateway could be inferred (even after waiting). "
                 f"Check: ip -4 route show default ; iw dev {preferred_dev} link"
             )
 
-        # Force preferred default
+        # Preferred route (low metric)
         subprocess.run(
             ["ip", "route", "replace", "default", "via", gw_pref, "dev", preferred_dev, "metric", "50"],
             check=False,
         )
 
-        # Keep backup as fallback with high metric (or delete)
-        gw_bak = _default_gw_for_dev(backup_dev)
-        if not gw_bak:
-            gw_bak = _dhcpcd_lease_router(backup_dev)
+        # Backup route (high metric)
+        gw_bak = _default_gw_for_dev(backup_dev) or _dhcpcd_lease_router(backup_dev) or gw_pref
+        subprocess.run(
+            ["ip", "route", "replace", "default", "via", gw_bak, "dev", backup_dev, "metric", "5000"],
+            check=False,
+        )
 
-        if gw_bak:
-            subprocess.run(
-                ["ip", "route", "replace", "default", "via", gw_bak, "dev", backup_dev, "metric", "5000"],
-                check=False,
-            )
-        else:
-            subprocess.run(["ip", "route", "del", "default", "dev", backup_dev], check=False)
+        # Flush route cache so "ip route get" stops showing cached old choice
+        subprocess.run(["ip", "route", "flush", "cache"], check=False)
 
     # If WAN is wlan0: connect upstream FIRST and obtain DHCP FIRST.
     if wan_if == "wlan0":
@@ -472,7 +466,7 @@ def _apply_ap_router(cfg: AppConfig) -> None:
 
         _dhcp_or_static("wlan0", cfg)
 
-        # THE REAL FIX: force routing preference (metrics), even if DHCP didn't add default on wlan0
+        # THE FIX: force wlan0 to win (eth0 currently wins due to metric).  [oai_citation:3‡log.txt](sediment://file_000000005cac7243aa3d6d90c7eb260c)
         _prefer_default(preferred_dev="wlan0", backup_dev="eth0")
 
         # Align AP channel to upstream channel (single-radio requirement)
