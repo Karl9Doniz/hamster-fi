@@ -1,11 +1,3 @@
-Below is a copy-paste README.md + an installer script that (1) installs hamsterfi-diag + hamsterfi-recover into /usr/local/bin, (2) creates the hamsterfi-web.service if it’s missing, (3) enables & starts it, and (4) optionally fixes the common “sudo: unable to resolve host hamsterfi” issue.
-
-I’m assuming your repo path is something like /home/admin/Documents/hamster-fi (that matches what your service already used).  ￼
-
-⸻
-
-README.md (drop this into your repo root)
-
 # Hamster-Fi 🐹📶 (Raspberry Pi 5 Wi-Fi Router for Humans)
 
 A tiny “Wi-Fi for hamsters” router appliance for Raspberry Pi (5) with a **Quick Wizard** and **Advanced** settings.
