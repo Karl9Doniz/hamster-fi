@@ -541,70 +541,90 @@ def _apply_station_router(cfg: AppConfig) -> None:
 
 def _apply_bridge_ap(cfg: AppConfig) -> None:
     import time
-
     br = "br0"
     ap_if = _ensure_ap_iface()
 
-    # Bridge AP assumes Ethernet uplink. (No Wi-Fi station bridging.)
-    _set_dhcpcd_mode("bridge", br)
-
-    # No DHCP server, no NAT in bridge mode
+    # Bridge AP = no DHCP server, no NAT/firewall from us
     subprocess.run(["systemctl", "stop", "dnsmasq"], check=False)
     subprocess.run(["systemctl", "disable", "dnsmasq"], check=False)
-
-    # Stop nftables (bridge should not NAT). Keep it simple.
     subprocess.run(["nft", "flush", "ruleset"], check=False)
     subprocess.run(["systemctl", "stop", "nftables"], check=False)
     subprocess.run(["systemctl", "disable", "nftables"], check=False)
 
-    # Start from a clean state
+    # Clean up any old bridge first
     _rm_bridge()
 
-    # Create bridge (ignore if already exists)
+    # IMPORTANT: keep current eth0 IP alive until br0 obtains DHCP
+    # (eth0 can temporarily keep an IP even while being a bridge port)
+
+    # Create bridge
     subprocess.run(["ip", "link", "add", br, "type", "bridge"], check=False)
-
-    # IMPORTANT: bridge members (eth0 and ap0) should NOT have IPv4 addresses.
-    subprocess.run(["ip", "addr", "flush", "dev", "eth0"], check=False)
-    subprocess.run(["ip", "addr", "flush", "dev", ap_if], check=False)
-
-    # Bridge itself must carry the management IP
-    subprocess.run(["ip", "addr", "flush", "dev", br], check=False)
-
-    # Add ports to bridge
-    subprocess.run(["ip", "link", "set", "eth0", "master", br], check=False)
-    subprocess.run(["ip", "link", "set", ap_if, "master", br], check=False)
-
-    # Bring everything up
+    # make it fast / predictable
+    subprocess.run(["ip", "link", "set", br, "type", "bridge", "stp_state", "0"], check=False)
     subprocess.run(["ip", "link", "set", br, "up"], check=False)
+
+    # Enslave ports to bridge (DO NOT flush eth0 yet)
     subprocess.run(["ip", "link", "set", "eth0", "up"], check=False)
     subprocess.run(["ip", "link", "set", ap_if, "up"], check=False)
 
-    # Start AP (hostapd should be configured to use the bridged ap_if)
-    _write(HOSTAPD_PATH, render_hostapd(cfg, ap_if=ap_if))
+    subprocess.run(["ip", "link", "set", "eth0", "master", br], check=False)
+    subprocess.run(["ip", "link", "set", ap_if, "master", br], check=False)
+
+    # Start AP (hostapd) on ap_if, but in bridge mode hostapd should know the bridge
+    conf = render_hostapd(cfg, ap_if=ap_if)
+    if f"\nbridge={br}\n" not in conf and not conf.rstrip().endswith(f"bridge={br}"):
+        conf = conf.rstrip() + f"\nbridge={br}\n"
+    _write(HOSTAPD_PATH, conf)
+
     subprocess.run(["systemctl", "enable", "hostapd"], check=False)
     subprocess.run(["systemctl", "restart", "hostapd"], check=False)
 
-    # --- Management IP on br0 (REQUIRED) ---
-    # dhcpcd is async; request a lease explicitly and wait for IPv4.
+    # Now br0 exists, so set dhcpcd mode AFTER creation
+    _set_dhcpcd_mode("bridge", br)
+
+    # Request DHCP on br0 (and WAIT). This is the key part.
+    got_ip = False
     if _have("dhcpcd"):
-        subprocess.run(["dhcpcd", "-k", br], check=False)
-        subprocess.run(["dhcpcd", "-n", br], check=False)
+        # Ensure daemon sees new iface + config
         subprocess.run(["systemctl", "restart", "dhcpcd"], check=False)
+        # Ask specifically for br0 and wait up to 25s
+        subprocess.run(["dhcpcd", "-4", "-t", "25", "-w", br], check=False)
     elif _have("dhclient"):
         subprocess.run(["dhclient", "-v", "-r", br], check=False)
         subprocess.run(["dhclient", "-v", br], check=False)
 
-    got_ip = False
-    for _ in range(30):  # up to ~15s
-        try:
-            out = _out(["ip", "-4", "addr", "show", "dev", br])
-        except Exception:
-            out = ""
-        if "inet " in out:
-            got_ip = True
-            break
-        time.sleep(0.5)
+    # Poll for IPv4 on br0
+    deadline = time.time() + 25
+    while time.time() < deadline:
+        out = subprocess.check_output(["ip", "-4", "-br", "addr", "show", br], text=True).strip()
+        # looks like: "br0 UP 192.168.110.123/24 ..."
+        if "inet " in out or ("/" in out and br in out):
+            if "169.254." not in out:  # ignore link-local fallback
+                got_ip = True
+                break
+        time.sleep(1)
 
     if not got_ip:
-        # Fail fast so your apply() rollback keeps the previous working mode
-        raise RuntimeError("Bridge AP: br0 did not obtain a DHCP address; refusing to leave UI unreachable.")
+        # Roll back bridge so you don't get stranded
+        subprocess.run(["ip", "link", "set", "eth0", "nomaster"], check=False)
+        subprocess.run(["ip", "link", "set", ap_if, "nomaster"], check=False)
+        subprocess.run(["ip", "link", "del", br], check=False)
+
+        # Bring eth0 back (best-effort)
+        if _have("dhcpcd"):
+            subprocess.run(["systemctl", "restart", "dhcpcd"], check=False)
+            subprocess.run(["dhcpcd", "-n", "eth0"], check=False)
+        elif _have("dhclient"):
+            subprocess.run(["dhclient", "-v", "eth0"], check=False)
+
+        raise RuntimeError(
+            "Bridge AP: br0 did not obtain a DHCP address; rolled back to avoid leaving UI unreachable."
+        )
+
+    # ✅ We have a br0 management IP now — safe to clean addresses on member ports
+    subprocess.run(["ip", "addr", "flush", "dev", "eth0"], check=False)
+    subprocess.run(["ip", "addr", "flush", "dev", ap_if], check=False)
+
+    # Also ensure br0 is the management interface for routing decisions (Pi itself)
+    # (No NAT here, but Pi needs default route for its own outbound access)
+    # dhcpcd/dhclient should have installed it; no extra changes required.
