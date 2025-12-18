@@ -357,9 +357,9 @@ def _apply_ap_router(cfg: AppConfig) -> None:
 
     # Avoid route fights: fully release the non-WAN interface
     other = "wlan0" if wan_if == "eth0" else "eth0"
-    # Avoid route fights: release DHCP on the non-WAN interface,
-    # but DO NOT force the link down (it breaks management + surprises the user).
+    # Release DHCP on the non-WAN interface, but DO NOT force the link down.
     _dhcp_release(other)
+    subprocess.run(["ip", "addr", "flush", "dev", other], check=False)
     subprocess.run(["ip", "link", "set", other, "up"], check=False)
 
     # If WAN is wlan0: connect upstream FIRST and obtain DHCP FIRST.
@@ -376,8 +376,29 @@ def _apply_ap_router(cfg: AppConfig) -> None:
         if not _wait_wlan0_connected(timeout_s=20):
             raise RuntimeError("wlan0 did not associate to upstream Wi-Fi (check SSID/PSK).")
 
+        # Get IP + gateway on wlan0
         _dhcp_or_static("wlan0", cfg)
+
+        # ---- IMPORTANT FIX ----
+        # Ensure routing matches NAT: prefer wlan0 and remove leftover default routes via eth0.
+        # If default route still points to eth0, traffic goes out eth0 while masquerade is on wlan0 => no internet.
+        has_wlan_default = _out(["ip", "-4", "route", "show", "default", "dev", "wlan0"], check=False).strip()
+        if not has_wlan_default:
+            raise RuntimeError("wlan0 is connected but has no default route (DHCP did not install a gateway).")
+
+        out = _out(["ip", "-4", "route", "show", "default"], check=False)
+        for ln in out.splitlines():
+            ln = ln.strip()
+            if not ln.startswith("default "):
+                continue
+            # keep defaults on wlan0, delete everything else
+            if " dev wlan0" in (" " + ln + " "):
+                continue
+            subprocess.run(["ip", "route", "del", *ln.split()], check=False)
+
+        # now clean up duplicates if any remained on wlan0
         _cleanup_duplicate_defaults(preferred_if="wlan0")
+        # ---- END FIX ----
 
         # Align AP channel to upstream channel (single-radio requirement)
         link = _read_wlan0_link_freq_channel()
@@ -407,6 +428,7 @@ def _apply_ap_router(cfg: AppConfig) -> None:
 
     _enable_router_sysctls()
 
+    # Use actual default uplink (after we forced routing) or fallback to selected WAN
     effective_wan = _detect_default_uplink() or wan_if
     _persist_nft_rules(cfg, wan_if=effective_wan, lan_if=ap_if)
 
