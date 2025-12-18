@@ -19,9 +19,6 @@ def status(request: Request):
     snap = status_snapshot()
     return templates.TemplateResponse("status.html", {"request": request, "cfg": cfg, "snap": snap})
 
-
-# --- Quick Wizard ---
-
 @app.get("/wizard", response_class=HTMLResponse)
 def wizard_mode(request: Request):
     cfg = load_config()
@@ -83,7 +80,6 @@ def wizard_wan_post(
 ):
     cfg = load_config()
 
-    # Enforce mode constraints (so UI can't accidentally save nonsense)
     if cfg.mode == "bridge":
         wan_device = "eth0"
     if cfg.mode == "station":
@@ -99,7 +95,6 @@ def wizard_wan_post(
         if dns_list:
             cfg.wan.static.dns = dns_list
 
-    # Require upstream credentials when WAN is Wi‑Fi (station OR AP+WAN=wlan0)
     need_upstream = (cfg.mode == "station") or (cfg.mode == "ap" and cfg.wan.device == "wlan0")
 
     if need_upstream:
@@ -107,7 +102,6 @@ def wizard_wan_post(
         cfg.wan.upstream_psk = upstream_psk.strip() or None
 
         if not cfg.wan.upstream_ssid or not cfg.wan.upstream_psk:
-            # Don't save a half-configured state
             return templates.TemplateResponse(
                 "wizard_wan.html",
                 {
@@ -145,8 +139,6 @@ def wizard_review(request: Request):
     return templates.TemplateResponse("wizard_review.html", {"request": request, "cfg": cfg})
 
 
-# --- Advanced mode ---
-
 @app.get("/advanced", response_class=HTMLResponse)
 def advanced(request: Request):
     cfg = load_config()
@@ -168,7 +160,6 @@ def get_config_yaml():
     return yaml.safe_dump(cfg.model_dump(), sort_keys=False)
 
 
-# --- Actions ---
 
 @app.get("/actions/apply")
 def apply_get():

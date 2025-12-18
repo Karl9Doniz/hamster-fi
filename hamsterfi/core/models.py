@@ -31,7 +31,7 @@ class LanConfig(BaseModel):
 
 class WlanConfig(BaseModel):
     ssid: str = "HamsterNet"
-    psk: str = "supersecret123"
+    psk: str = "hamster12345"
     country: str = "UA"
     channel: int = 6
 

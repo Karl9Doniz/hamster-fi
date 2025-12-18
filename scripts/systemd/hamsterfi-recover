@@ -1,12 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# --- defaults (known-good AP router mode) ---
 LAN_IF="ap0"
 LAN_CIDR="192.168.50.1/24"
 LAN_IP="192.168.50.1"
 SSID="HamsterNet"
-PSK="hamster12345"   # >= 8 chars
+PSK="hamster12345"   
 WAN_IF="eth0"
 UI_PORT="8080"
 
@@ -58,7 +57,6 @@ service_restart() {
   }
 }
 
-# --- main ---
 need_root
 
 log "Backing up current config to $BACKUP_DIR"
@@ -136,33 +134,27 @@ nft 'add chain inet filter forward { type filter hook forward priority 0; policy
 nft add rule inet filter input iif lo accept
 nft add rule inet filter input ct state established,related accept
 
-# DHCP/DNS from LAN clients
 nft add rule inet filter input iifname "$LAN_IF" udp dport 67 accept
 nft add rule inet filter input iifname "$LAN_IF" udp dport 68 accept
 nft add rule inet filter input iifname "$LAN_IF" udp dport 53 accept
 nft add rule inet filter input iifname "$LAN_IF" tcp dport 53 accept
 
 nft add rule inet filter input iifname "$LAN_IF" tcp dport "$UI_PORT" accept
-# ping for sanity
 nft add rule inet filter input ip protocol icmp accept
 
-# Forward LAN -> WAN
 nft add rule inet filter forward ct state established,related accept
 nft add rule inet filter forward iifname "$LAN_IF" oifname "$WAN_IF" accept
 
-# NAT
 nft add table ip nat
 nft 'add chain ip nat postrouting { type nat hook postrouting priority 100; policy accept; }'
 nft add rule ip nat postrouting oifname "$WAN_IF" masquerade
 
-# SSH
 nft add rule inet filter input iifname "wlan0" tcp dport 22 ct state new accept
 
 log "Starting services"
 service_restart hostapd
 service_restart dnsmasq
 
-# Always start the web UI if the unit file exists
 if [[ -f /etc/systemd/system/hamsterfi-web.service || -f /lib/systemd/system/hamsterfi-web.service ]]; then
   log "Starting hamsterfi-web.service"
   systemctl daemon-reload || true

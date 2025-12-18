@@ -144,11 +144,8 @@ def _detect_default_uplink() -> Optional[str]:
 def _persist_nft_rules(cfg: AppConfig, wan_if: str, lan_if: str) -> None:
     rules = render_nft(cfg, wan_if=wan_if, lan_if=lan_if, ui_port=UI_PORT)
 
-    # --- Keep hamsterfi.local working in AP mode ---
-    # mDNS = UDP/5353 (224.0.0.251). Your default policy is drop, so we must allow it on LAN/AP iface.
     mdns_rule = f'iifname "{lan_if}" udp dport 5353 accept'
 
-    # If render_nft doesn't already allow 5353 on LAN, inject it near other LAN accepts.
     if mdns_rule not in rules:
         lines = rules.splitlines()
         out = []
@@ -157,19 +154,14 @@ def _persist_nft_rules(cfg: AppConfig, wan_if: str, lan_if: str) -> None:
         for ln in lines:
             out.append(ln)
 
-            # After we allow UI port on LAN, inject mDNS (nice and local).
-            # This matches your typical structure: ... tcp dport 8080 accept
             if (not injected) and (f'iifname "{lan_if}"' in ln) and ("tcp dport" in ln) and ("accept" in ln):
-                # Insert right after the first LAN accept rule we see
                 out.append(f"\t\t{mdns_rule}")
                 injected = True
 
-        # If we didn't find a good spot, inject before the end of input chain as fallback.
         if not injected:
             out2 = []
             for ln in out:
                 if (not injected) and ln.strip() == "}":
-                    # crude but works: add before first closing brace after input chain content
                     out2.append(f"\t\t{mdns_rule}")
                     injected = True
                 out2.append(ln)
@@ -177,24 +169,19 @@ def _persist_nft_rules(cfg: AppConfig, wan_if: str, lan_if: str) -> None:
 
         rules = "\n".join(out) + "\n"
 
-    # Write the rules file
     _write(NFT_PATH, rules)
 
-    # Ensure main nftables.conf includes /etc/nftables.d/*.nft
     _write(
         "/etc/nftables.conf",
         "flush ruleset\n"
         "include \"/etc/nftables.d/*.nft\"\n",
     )
 
-    # Load rules immediately
     _run(["nft", "-f", "/etc/nftables.conf"], check=True)
 
-    # Enable + restart services
     subprocess.run(["systemctl", "enable", "nftables"], check=False)
     subprocess.run(["systemctl", "restart", "nftables"], check=False)
 
-    # Restart Avahi so hostname advertisement follows interface changes reliably
     subprocess.run(["systemctl", "enable", "avahi-daemon"], check=False)
     subprocess.run(["systemctl", "restart", "avahi-daemon"], check=False)
 
@@ -309,10 +296,6 @@ def _wait_wlan0_connected(timeout_s: int = 15) -> bool:
 
 
 def apply(cfg: AppConfig) -> None:
-    # Crash-safe-ish apply:
-    # 1) snapshot current on-disk config files we touch
-    # 2) attempt to apply requested mode
-    # 3) on any failure, restore files + restart services so the box stays reachable
 
     files_to_backup = [
         HOSTAPD_PATH,
@@ -330,14 +313,12 @@ def apply(cfg: AppConfig) -> None:
         except FileNotFoundError:
             backups[p] = None
         except Exception:
-            # don't fail apply because a backup read failed
             backups[p] = None
 
     def _restore_files() -> None:
         for p, content in backups.items():
             try:
                 if content is None:
-                    # remove file if we created it
                     if os.path.exists(p):
                         os.remove(p)
                 else:
@@ -348,12 +329,9 @@ def apply(cfg: AppConfig) -> None:
                 pass
 
     try:
-        # Stop LAN services before changing interfaces/config.
-        # (We restart them later in the mode-specific routines.)
         subprocess.run(["systemctl", "stop", "hostapd"], check=False)
         subprocess.run(["systemctl", "stop", "dnsmasq"], check=False)
 
-        # Never leave physical links down.
         subprocess.run(["ip", "link", "set", "eth0", "up"], check=False)
         subprocess.run(["ip", "link", "set", "wlan0", "up"], check=False)
 
@@ -367,23 +345,19 @@ def apply(cfg: AppConfig) -> None:
             raise RuntimeError(f"Unknown mode: {cfg.mode}")
 
     except Exception:
-        # Restore on-disk configs and try to put services back.
         _restore_files()
 
-        # Remove any unexpected bridge that could have been created.
         try:
             _rm_bridge()
         except Exception:
             pass
 
-        # Best-effort: bring AP iface back so user can recover via UI
         try:
             ap_if = _ensure_ap_iface()
             subprocess.run(["ip", "link", "set", ap_if, "up"], check=False)
         except Exception:
             pass
 
-        # Restart core services (best-effort)
         for svc in ["dhcpcd", "nftables", "hostapd", "dnsmasq", "wpa_supplicant@wlan0"]:
             subprocess.run(["systemctl", "restart", svc], check=False)
 
@@ -398,8 +372,6 @@ def _apply_ap_router(cfg: AppConfig) -> None:
     _set_dhcpcd_mode("ap", wan_if)
     _rm_bridge()
 
-    # Avoid route fights: release DHCP on the non-WAN interface,
-    # but DO NOT force the link down (it breaks management + surprises the user).
     other = "wlan0" if wan_if == "eth0" else "eth0"
     _dhcp_release(other)
     subprocess.run(["ip", "addr", "flush", "dev", other], check=False)
@@ -477,23 +449,19 @@ def _apply_ap_router(cfg: AppConfig) -> None:
                 f"Check: ip -4 route show default ; iw dev {preferred_dev} link"
             )
 
-        # Preferred route (low metric)
         subprocess.run(
             ["ip", "route", "replace", "default", "via", gw_pref, "dev", preferred_dev, "metric", "50"],
             check=False,
         )
 
-        # Backup route (high metric)
         gw_bak = _default_gw_for_dev(backup_dev) or _dhcpcd_lease_router(backup_dev) or gw_pref
         subprocess.run(
             ["ip", "route", "replace", "default", "via", gw_bak, "dev", backup_dev, "metric", "5000"],
             check=False,
         )
 
-        # Flush route cache so "ip route get" stops showing cached old choice
         subprocess.run(["ip", "route", "flush", "cache"], check=False)
 
-    # If WAN is wlan0: connect upstream FIRST and obtain DHCP FIRST.
     if wan_if == "wlan0":
         if not cfg.wan.upstream_ssid or not cfg.wan.upstream_psk:
             raise RuntimeError("AP mode with WAN=wlan0 requires upstream SSID+PSK.")
@@ -509,31 +477,25 @@ def _apply_ap_router(cfg: AppConfig) -> None:
 
         _dhcp_or_static("wlan0", cfg)
 
-        # THE FIX: force wlan0 to win (eth0 currently wins due to metric).  [oai_citation:3‡log.txt](sediment://file_000000005cac7243aa3d6d90c7eb260c)
         _prefer_default(preferred_dev="wlan0", backup_dev="eth0")
 
-        # Align AP channel to upstream channel (single-radio requirement)
         link = _read_wlan0_link_freq_channel()
         if link is not None:
             _, upstream_ch = link
             cfg.wlan.channel = upstream_ch
 
-    # LAN address on AP iface
     subprocess.run(["ip", "link", "set", ap_if, "up"], check=False)
     subprocess.run(["ip", "addr", "flush", "dev", ap_if], check=False)
     subprocess.run(["ip", "addr", "add", cfg.lan.address, "dev", ap_if], check=True)
 
-    # Start AP
     _write(HOSTAPD_PATH, render_hostapd(cfg, ap_if=ap_if))
     subprocess.run(["systemctl", "enable", "hostapd"], check=False)
     subprocess.run(["systemctl", "restart", "hostapd"], check=False)
 
-    # Configure WAN if eth0
     if wan_if == "eth0":
         _dhcp_or_static("eth0", cfg)
         _prefer_default(preferred_dev="eth0", backup_dev="wlan0")
 
-    # DHCP/DNS on LAN
     _write(DNSMASQ_PATH, render_dnsmasq(cfg, lan_if=ap_if))
     subprocess.run(["systemctl", "enable", "dnsmasq"], check=False)
     subprocess.run(["systemctl", "restart", "dnsmasq"], check=False)
@@ -561,10 +523,12 @@ def _apply_station_router(cfg: AppConfig) -> None:
         raise RuntimeError("wlan0 did not associate to upstream Wi-Fi (check SSID/PSK).")
 
     _dhcp_release("eth0")
-    subprocess.run(["ip", "link", "set", "eth0", "down"], check=False)
+    subprocess.run(["ip", "link", "set", "eth0", "up"], check=False)
 
     _dhcp_or_static("wlan0", cfg)
+
     _cleanup_duplicate_defaults(preferred_if="wlan0")
+    subprocess.run(["ip", "route", "flush", "cache"], check=False)
 
     subprocess.run(["ip", "addr", "flush", "dev", "eth0"], check=False)
     subprocess.run(["ip", "addr", "add", cfg.lan.address, "dev", "eth0"], check=True)
@@ -578,6 +542,7 @@ def _apply_station_router(cfg: AppConfig) -> None:
     subprocess.run(["systemctl", "disable", "hostapd"], check=False)
 
     _enable_router_sysctls()
+
     effective_wan = _detect_default_uplink() or "wlan0"
     _persist_nft_rules(cfg, wan_if=effective_wan, lan_if="eth0")
 
@@ -587,28 +552,23 @@ def _apply_bridge_ap(cfg: AppConfig) -> None:
     br = "br0"
     ap_if = _ensure_ap_iface()
 
-    # Bridge AP = no DHCP server, no NAT/firewall from us
     subprocess.run(["systemctl", "stop", "dnsmasq"], check=False)
     subprocess.run(["systemctl", "disable", "dnsmasq"], check=False)
     subprocess.run(["nft", "flush", "ruleset"], check=False)
     subprocess.run(["systemctl", "stop", "nftables"], check=False)
     subprocess.run(["systemctl", "disable", "nftables"], check=False)
 
-    # Clean up any old bridge first
     _rm_bridge()
 
-    # Create bridge
     subprocess.run(["ip", "link", "add", br, "type", "bridge"], check=False)
     subprocess.run(["ip", "link", "set", br, "type", "bridge", "stp_state", "0"], check=False)
     subprocess.run(["ip", "link", "set", br, "up"], check=False)
 
-    # Enslave ports to bridge (DO NOT flush eth0 yet)
     subprocess.run(["ip", "link", "set", "eth0", "up"], check=False)
     subprocess.run(["ip", "link", "set", ap_if, "up"], check=False)
     subprocess.run(["ip", "link", "set", "eth0", "master", br], check=False)
     subprocess.run(["ip", "link", "set", ap_if, "master", br], check=False)
 
-    # Start AP; ensure hostapd bridges via br0
     conf = render_hostapd(cfg, ap_if=ap_if)
     if f"\nbridge={br}\n" not in conf and not conf.rstrip().endswith(f"bridge={br}"):
         conf = conf.rstrip() + f"\nbridge={br}\n"
@@ -616,14 +576,9 @@ def _apply_bridge_ap(cfg: AppConfig) -> None:
     subprocess.run(["systemctl", "enable", "hostapd"], check=False)
     subprocess.run(["systemctl", "restart", "hostapd"], check=False)
 
-    # --- KEY FIX: make dhcpcd manage ONLY br0 in bridge mode ---
-    # Otherwise it will happily DHCP eth0 and install default route with a better metric.
     if _have("dhcpcd"):
         subprocess.run(["mkdir", "-p", "/etc/dhcpcd.conf.d"], check=False)
 
-        # This drop-in overrides behavior in bridge mode:
-        # - Do NOT manage eth0 or the AP iface
-        # - Manage br0 and let it install the default route
         bridge_conf = (
             "# Managed by hamsterfi (bridge mode)\n"
             "denyinterfaces eth0\n"
@@ -635,19 +590,15 @@ def _apply_bridge_ap(cfg: AppConfig) -> None:
         )
         _write("/etc/dhcpcd.conf.d/99-hamsterfi-bridge.conf", bridge_conf)
 
-        # Restart dhcpcd so it drops eth0 routing and starts managing br0
         subprocess.run(["systemctl", "restart", "dhcpcd"], check=False)
 
-        # Explicitly release eth0 lease/routes and request on br0
         subprocess.run(["dhcpcd", "-k", "eth0"], check=False)
         subprocess.run(["dhcpcd", "-4", "-t", "25", "-w", br], check=False)
 
-    # If dhclient is used instead (rare on Pi OS), keep your old behavior
     elif _have("dhclient"):
         subprocess.run(["dhclient", "-v", "-r", br], check=False)
         subprocess.run(["dhclient", "-v", br], check=False)
 
-    # Poll for IPv4 on br0
     got_ip = False
     deadline = time.time() + 25
     while time.time() < deadline:
@@ -658,12 +609,10 @@ def _apply_bridge_ap(cfg: AppConfig) -> None:
         time.sleep(1)
 
     if not got_ip:
-        # Roll back bridge so you don't get stranded
         subprocess.run(["ip", "link", "set", "eth0", "nomaster"], check=False)
         subprocess.run(["ip", "link", "set", ap_if, "nomaster"], check=False)
         subprocess.run(["ip", "link", "del", br], check=False)
 
-        # Bring eth0 back (best-effort)
         if _have("dhcpcd"):
             subprocess.run(["systemctl", "restart", "dhcpcd"], check=False)
             subprocess.run(["dhcpcd", "-n", "eth0"], check=False)
@@ -674,14 +623,11 @@ def _apply_bridge_ap(cfg: AppConfig) -> None:
             "Bridge AP: br0 did not obtain a DHCP address; rolled back to avoid leaving UI unreachable."
         )
 
-    # ✅ We have a br0 management IP now — safe to clean addresses on member ports
     subprocess.run(["ip", "addr", "flush", "dev", "eth0"], check=False)
     subprocess.run(["ip", "addr", "flush", "dev", ap_if], check=False)
 
-    # --- Belt + suspenders: ensure eth0 has NO default route, br0 wins ---
     subprocess.run(["ip", "route", "del", "default", "dev", "eth0"], check=False)
 
-    # If br0 has a default route, force it to a low metric
     gw = None
     try:
         d = _out(["ip", "-4", "route", "show", "default", "dev", br]).strip()
