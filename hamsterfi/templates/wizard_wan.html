@@ -1,0 +1,47 @@
+{% extends "layout.html" %}
+{% block content %}
+<div class="p-6 rounded-2xl bg-slate-900 shadow">
+  <div class="text-xl font-semibold mb-2">Step 2 — WAN (Internet source)</div>
+
+  <div class="text-slate-400 mb-4">
+    Pick where the Pi gets internet from. In <span class="text-slate-200">AP</span> mode you can use either <b>Ethernet WAN</b> or <b>Wi-Fi WAN</b> (wlan0 joins an upstream network while ap0 stays as the hotspot).
+  </div>
+
+  <form method="post" action="/wizard/wan" class="space-y-4">
+    <div>
+      <div class="font-semibold mb-2">WAN device</div>
+      <select name="wan_device" class="w-full p-3 rounded-xl bg-slate-800">
+        <option value="eth0" {% if cfg.wan.device=='eth0' %}selected{% endif %}>Ethernet (eth0)</option>
+        <option value="wlan0" {% if cfg.wan.device=='wlan0' %}selected{% endif %}>Wi-Fi (wlan0)</option>
+      </select>
+    </div>
+
+    <div>
+      <div class="font-semibold mb-2">WAN IPv4</div>
+      <select name="wan_ipv4" class="w-full p-3 rounded-xl bg-slate-800">
+        <option value="dhcp" {% if cfg.wan.ipv4=='dhcp' %}selected{% endif %}>Dynamic (DHCP)</option>
+        <option value="static" {% if cfg.wan.ipv4=='static' %}selected{% endif %}>Static</option>
+      </select>
+    </div>
+
+    <div class="p-4 rounded-xl bg-slate-800">
+      <div class="font-semibold mb-2">Static (only if selected)</div>
+      <input name="static_address" class="w-full p-2 rounded bg-slate-900 mb-2" placeholder="192.168.1.200/24" value="{{cfg.wan.static.address}}">
+      <input name="static_gateway" class="w-full p-2 rounded bg-slate-900 mb-2" placeholder="192.168.1.1" value="{{cfg.wan.static.gateway}}">
+      <input name="static_dns" class="w-full p-2 rounded bg-slate-900" placeholder="1.1.1.1,8.8.8.8" value="{{cfg.wan.static.dns | join(',')}}">
+    </div>
+
+    {% if (cfg.mode == "station") or (cfg.mode == "ap" and cfg.wan.device == "wlan0") %}
+    <div class="p-4 rounded-xl bg-slate-800">
+      <div class="font-semibold mb-2">Upstream Wi-Fi credentials</div>
+      <input name="upstream_ssid" class="w-full p-2 rounded bg-slate-900 mb-2" placeholder="Upstream SSID" value="{{cfg.wan.upstream_ssid or ''}}">
+      <input name="upstream_psk" class="w-full p-2 rounded bg-slate-900" placeholder="Upstream password" type="password" value="{{cfg.wan.upstream_psk or ''}}">
+    </div>
+    {% endif %}
+
+    <button class="w-full py-3 rounded-xl bg-emerald-600 hover:bg-emerald-500 font-semibold">
+      Continue
+    </button>
+  </form>
+</div>
+{% endblock %}

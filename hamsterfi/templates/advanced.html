@@ -1,0 +1,27 @@
+{% extends "layout.html" %}
+{% block content %}
+<div class="p-6 rounded-2xl bg-slate-900 shadow">
+  <div class="text-xl font-semibold mb-2">Advanced configuration</div>
+  <div class="text-slate-400 mb-4">
+    Edit the full config in YAML. This is saved to <code>/etc/hamster-fi/config.yaml</code> and persists after reboot.
+    If you break something, use <b>Reset config</b> / <b>Factory defaults</b> on the Status page.
+  </div>
+
+  <form method="post" action="/advanced" class="space-y-4">
+    <textarea name="config_yaml" class="w-full h-[28rem] p-4 rounded-xl bg-slate-800 font-mono text-xs" spellcheck="false">{{ yaml_text }}</textarea>
+
+    <div class="grid md:grid-cols-2 gap-2">
+      <button class="w-full py-3 rounded-xl bg-emerald-600 hover:bg-emerald-500 font-semibold">
+        Save config
+      </button>
+      <a class="w-full py-3 rounded-xl bg-slate-700 hover:bg-slate-600 font-semibold text-center" href="/">
+        Back to status
+      </a>
+    </div>
+  </form>
+
+  <div class="text-slate-400 text-sm mt-4">
+    Tip: you can also download the current config at <code>/api/config.yaml</code>.
+  </div>
+</div>
+{% endblock %}

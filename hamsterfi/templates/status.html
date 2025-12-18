@@ -1,0 +1,50 @@
+{% extends "layout.html" %}
+{% block content %}
+<div class="grid gap-4">
+  <div class="p-6 rounded-2xl bg-slate-900 shadow">
+    <div class="text-xl font-semibold mb-2">Status</div>
+    <div class="text-slate-400 mb-4">Current config + live network snapshot.</div>
+
+    <div class="grid md:grid-cols-2 gap-3">
+      <div class="p-4 rounded-xl bg-slate-800">
+        <div class="font-semibold">Mode</div>
+        <div class="text-slate-300">{{cfg.mode}}</div>
+      </div>
+      <div class="p-4 rounded-xl bg-slate-800">
+        <div class="font-semibold">WAN</div>
+        <div class="text-slate-300">{{cfg.wan.device}} ({{cfg.wan.ipv4}})</div>
+      </div>
+      <div class="p-4 rounded-xl bg-slate-800">
+        <div class="font-semibold">LAN Wi‑Fi</div>
+        <div class="text-slate-300">{{cfg.wlan.ssid}}</div>
+      </div>
+      <div class="p-4 rounded-xl bg-slate-800">
+        <div class="font-semibold">Services</div>
+        <div class="text-slate-300">dnsmasq={{snap.dnsmasq}} · hostapd={{snap.hostapd}}</div>
+      </div>
+    </div>
+
+    <div class="flex gap-2 mt-4">
+      <form method="post" action="/actions/apply" class="flex-1">
+        <button class="w-full py-3 rounded-xl bg-emerald-600 hover:bg-emerald-500 font-semibold">Apply now</button>
+      </form>
+      <form method="post" action="/actions/reset" class="flex-1">
+        <button class="w-full py-3 rounded-xl bg-slate-700 hover:bg-slate-600 font-semibold">Reset config</button>
+      </form>
+      <form method="post" action="/actions/factory" class="flex-1">
+        <button class="w-full py-3 rounded-xl bg-rose-700 hover:bg-rose-600 font-semibold">Factory defaults</button>
+      </form>
+    </div>
+  </div>
+
+  <div class="p-6 rounded-2xl bg-slate-900 shadow">
+    <div class="text-lg font-semibold mb-2">Network snapshot</div>
+    <pre class="text-xs whitespace-pre-wrap bg-slate-800 p-4 rounded-xl overflow-auto">{{snap.ip_addr}}
+
+{{snap.ip_route}}
+
+{{snap.iw_wlan0}}
+</pre>
+  </div>
+</div>
+{% endblock %}

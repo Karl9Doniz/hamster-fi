@@ -1,0 +1,24 @@
+{% extends "layout.html" %}
+{% block content %}
+<div class="p-6 rounded-2xl bg-slate-900 shadow">
+  <div class="text-xl font-semibold mb-2">Review</div>
+
+  <div class="p-4 rounded-xl bg-slate-800 space-y-2">
+    <div><b>Mode:</b> {{cfg.mode}}</div>
+    <div><b>WAN:</b> {{cfg.wan.device}} ({{cfg.wan.ipv4}})</div>
+    <div><b>LAN Wi‑Fi:</b> {{cfg.wlan.ssid}}</div>
+    {% if cfg.mode == "station" %}
+      <div><b>Upstream SSID:</b> {{cfg.wan.upstream_ssid}}</div>
+    {% endif %}
+    <div class="text-slate-400 text-sm">
+      Apply will reconfigure networking. Your connection may drop; reconnect to the new LAN.
+    </div>
+  </div>
+
+  <form method="post" action="/actions/apply" class="mt-4">
+    <button class="w-full py-3 rounded-xl bg-emerald-600 hover:bg-emerald-500 font-semibold">
+      Apply configuration
+    </button>
+  </form>
+</div>
+{% endblock %}

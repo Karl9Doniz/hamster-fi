@@ -1,0 +1,15 @@
+{% extends "layout.html" %}
+{% block content %}
+<div class="p-6 rounded-2xl bg-slate-900 shadow">
+  <div class="text-xl font-semibold mb-2">Step 3 — Hamster Wi‑Fi (LAN)</div>
+  <div class="text-slate-400 mb-4">This is the SSID your devices connect to.</div>
+
+  <form method="post" action="/wizard/wlan" class="space-y-3">
+    <input name="ssid" class="w-full p-3 rounded-xl bg-slate-800" placeholder="HamsterNet" value="{{cfg.wlan.ssid}}">
+    <input name="psk" type="password" class="w-full p-3 rounded-xl bg-slate-800" placeholder="Wi‑Fi password" value="{{cfg.wlan.psk}}">
+    <button class="w-full py-3 rounded-xl bg-emerald-600 hover:bg-emerald-500 font-semibold">
+      Continue
+    </button>
+  </form>
+</div>
+{% endblock %}

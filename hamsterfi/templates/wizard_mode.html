@@ -1,0 +1,31 @@
+{% extends "layout.html" %}
+{% block content %}
+<div class="p-6 rounded-2xl bg-slate-900 shadow">
+  <div class="text-xl font-semibold mb-2">Step 1 — Choose mode</div>
+  <div class="text-slate-400 mb-4">Pick a ready profile. No advanced questions.</div>
+
+  <form method="post" action="/wizard/mode" class="space-y-3">
+    <label class="block p-4 rounded-xl bg-slate-800 hover:bg-slate-700 cursor-pointer">
+      <input type="radio" name="mode" value="ap" class="mr-2" checked>
+      <span class="font-semibold">AP Router</span>
+      <div class="text-slate-400 text-sm">Creates Wi‑Fi (LAN) and routes to WAN (NAT + DHCP + minimal firewall).</div>
+    </label>
+
+    <label class="block p-4 rounded-xl bg-slate-800 hover:bg-slate-700 cursor-pointer">
+      <input type="radio" name="mode" value="station" class="mr-2">
+      <span class="font-semibold">Station Router</span>
+      <div class="text-slate-400 text-sm">Joins upstream Wi‑Fi as WAN and shares internet to Ethernet (NAT + DHCP).</div>
+    </label>
+
+    <label class="block p-4 rounded-xl bg-slate-800 hover:bg-slate-700 cursor-pointer">
+      <input type="radio" name="mode" value="bridge" class="mr-2">
+      <span class="font-semibold">Bridge AP</span>
+      <div class="text-slate-400 text-sm">Wi‑Fi AP bridged to Ethernet. No NAT, no DHCP (upstream does DHCP).</div>
+    </label>
+
+    <button class="mt-4 w-full py-3 rounded-xl bg-emerald-600 hover:bg-emerald-500 font-semibold">
+      Continue
+    </button>
+  </form>
+</div>
+{% endblock %}
