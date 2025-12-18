@@ -353,24 +353,60 @@ def _apply_ap_router(cfg: AppConfig) -> None:
     _set_dhcpcd_mode("ap", wan_if)
     _rm_bridge()
 
-    # Capture fallback gateway (often from eth0) BEFORE we start messing with routes.
-    fallback_gw = None
-    try:
-        defaults_before = _out(["ip", "-4", "route", "show", "default"]) or ""
-        for ln in defaults_before.splitlines():
-            parts = ln.strip().split()
-            if len(parts) >= 5 and parts[0] == "default" and parts[1] == "via":
-                fallback_gw = parts[2]
-                break
-    except Exception:
-        fallback_gw = None
-
     # Avoid route fights: release DHCP on the non-WAN interface,
     # but DO NOT force the link down (it breaks management + surprises the user).
     other = "wlan0" if wan_if == "eth0" else "eth0"
     _dhcp_release(other)
     subprocess.run(["ip", "addr", "flush", "dev", other], check=False)
     subprocess.run(["ip", "link", "set", other, "up"], check=False)
+
+    def _get_gw_for_dev(dev: str) -> str | None:
+        """
+        Return gateway IP from: ip -4 route show default dev <dev>
+        Expected format: 'default via <GW> dev <dev> ...'
+        """
+        try:
+            out = (_out(["ip", "-4", "route", "show", "default", "dev", dev]) or "").strip()
+        except Exception:
+            return None
+
+        for ln in out.splitlines():
+            parts = ln.split()
+            if not parts:
+                continue
+            if parts[0] != "default":
+                continue
+            if "via" in parts:
+                i = parts.index("via")
+                if i + 1 < len(parts):
+                    return parts[i + 1]
+        return None
+
+    def _prefer_wan_default(preferred_dev: str, backup_dev: str) -> None:
+        """
+        Make preferred_dev the kernel's chosen uplink by metrics.
+        Keep backup_dev as fallback with a very high metric.
+        """
+        gw_pref = _get_gw_for_dev(preferred_dev)
+        if not gw_pref:
+            raise RuntimeError(f"{preferred_dev} has no default route (no gateway).")
+
+        # Preferred route: low metric
+        subprocess.run(
+            ["ip", "route", "replace", "default", "via", gw_pref, "dev", preferred_dev, "metric", "50"],
+            check=False,
+        )
+
+        # Backup route: if it exists, push it far away via a high metric (or delete if you prefer)
+        gw_bak = _get_gw_for_dev(backup_dev)
+        if gw_bak:
+            subprocess.run(
+                ["ip", "route", "replace", "default", "via", gw_bak, "dev", backup_dev, "metric", "5000"],
+                check=False,
+            )
+        else:
+            # If no gateway on backup dev, at least remove any stray default bound to that dev
+            subprocess.run(["ip", "route", "del", "default", "dev", backup_dev], check=False)
 
     # If WAN is wlan0: connect upstream FIRST and obtain DHCP FIRST.
     if wan_if == "wlan0":
@@ -388,54 +424,8 @@ def _apply_ap_router(cfg: AppConfig) -> None:
 
         _dhcp_or_static("wlan0", cfg)
 
-        # ---- ROUTING FIX (robust) ----
-        # dhcpcd may refuse to install a second default route on wlan0
-        # if eth0 already had one (same upstream). If wlan0 has no default,
-        # steal gateway from an existing default and force default via wlan0.
-        try:
-            has_wlan_default = (_out(["ip", "-4", "route", "show", "default", "dev", "wlan0"]) or "").strip()
-        except Exception:
-            has_wlan_default = ""
-
-        if not has_wlan_default:
-            # Try to learn gateway again (maybe eth0 default still exists)
-            gw = fallback_gw
-            if gw is None:
-                try:
-                    dnow = _out(["ip", "-4", "route", "show", "default"]) or ""
-                    for ln in dnow.splitlines():
-                        parts = ln.strip().split()
-                        if len(parts) >= 5 and parts[0] == "default" and parts[1] == "via":
-                            gw = parts[2]
-                            break
-                except Exception:
-                    gw = None
-
-            if gw is None:
-                raise RuntimeError(
-                    "wlan0 is connected but has no default route, and I couldn't infer a gateway. "
-                    "Run: ip -4 route show default ; ip -4 addr show wlan0"
-                )
-
-            # Force the default route via wlan0
-            subprocess.run(["ip", "route", "replace", "default", "via", gw, "dev", "wlan0", "metric", "50"], check=False)
-
-        # Now delete any default routes NOT on wlan0 (typically eth0 leftovers)
-        try:
-            defaults = _out(["ip", "-4", "route", "show", "default"]) or ""
-        except Exception:
-            defaults = ""
-
-        for ln in defaults.splitlines():
-            ln = ln.strip()
-            if not ln.startswith("default "):
-                continue
-            if " dev wlan0" in (" " + ln + " "):
-                continue
-            subprocess.run(["ip", "route", "del", *ln.split()], check=False)
-
-        _cleanup_duplicate_defaults(preferred_if="wlan0")
-        # ---- END ROUTING FIX ----
+        # THE FIX: prefer wlan0 by metric, keep eth0 as backup
+        _prefer_wan_default(preferred_dev="wlan0", backup_dev="eth0")
 
         # Align AP channel to upstream channel (single-radio requirement)
         link = _read_wlan0_link_freq_channel()
@@ -456,7 +446,8 @@ def _apply_ap_router(cfg: AppConfig) -> None:
     # Configure WAN if eth0
     if wan_if == "eth0":
         _dhcp_or_static("eth0", cfg)
-        _cleanup_duplicate_defaults(preferred_if="eth0")
+        # Prefer eth0; keep wlan0 as backup (same logic)
+        _prefer_wan_default(preferred_dev="eth0", backup_dev="wlan0")
 
     # DHCP/DNS on LAN
     _write(DNSMASQ_PATH, render_dnsmasq(cfg, lan_if=ap_if))
